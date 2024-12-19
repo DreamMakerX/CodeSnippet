@@ -125,9 +125,10 @@ void performanceTest(Func&& func, uint64_t count = 1000000) {
 
 void loggerPerformanceTest() {
 	// 同步/异步日志测试
-	Logger logger("ClionProjectLogs", Logger::LogLevel::INFO, true);
+//    Logger logger("ClionProjectLogs");
+    Logger logger("ClionProjectLogs", Logger::LogLevel::LOG_INFO, false, true);
 	auto loggerLambda = [&logger]() {
-		return logger.log("Hello World", Logger::LogLevel::INFO);
+		return logger.log("Hello World", Logger::LogLevel::LOG_INFO);
 	};
 	for(auto i = 0; i < 10; ++i) {
 		performanceTest(loggerLambda);
@@ -159,6 +160,6 @@ void stringFormatPerformanceTest() {
 }
 
 int main() {
-	stringFormatPerformanceTest();
+    loggerPerformanceTest();
 	return 0;
 }

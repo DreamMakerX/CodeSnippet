@@ -84,11 +84,9 @@ public:
 		va_list args;
 		va_start(args, format);
 
-		char buffer[MAX_BUFFER_SIZE_];
-		vsnprintf(buffer, sizeof(buffer), format, args);
+		char buffer[MAX_BUFFER_SIZE_]{0};
+		vsnprintf(buffer, MAX_BUFFER_SIZE_ - 1, format, args);
 		va_end(args);
-
-		buffer[MAX_BUFFER_SIZE_ - 1] = 0x00;  // 防止打印溢出
 
 		file_ << buffer << std::endl;
 	}

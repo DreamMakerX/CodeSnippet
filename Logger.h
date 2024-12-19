@@ -11,20 +11,19 @@
 #include <vector>
 #include <deque>
 #include <atomic>
-#include <condition_variable>
 
 class Logger {
 public:
-	enum class LogLevel {
-		DEBUG,
-		INFO,
-		WARNING,
-		ERROR
+	enum class LogLevel {// 日志等级
+		LOG_DEBUG,
+		LOG_INFO,
+		LOG_WARNING,
+		LOG_ERROR
 	};
 
 	// 构造函数
-	Logger(const std::string& baseName, LogLevel level = LogLevel::INFO, bool async = false, uint64_t logCycle = 10,
-	       bool daily = false, int retentionDays = 30, size_t maxSize = 50 * 1024 * 1024);
+	Logger(const std::string& folderName, LogLevel level = LogLevel::LOG_INFO, bool daily = false,
+           bool async = false, uint64_t logCycle = 10, int retentionDays = 30, size_t maxSize = 50 * 1024 * 1024);
 
 	// 析构函数
 	~Logger();
@@ -33,28 +32,29 @@ public:
 	void setLogLevel(LogLevel level);
 
 	// 同步日志
-	void log(const std::string& message, LogLevel level = LogLevel::INFO);
+	void log(const std::string& message, LogLevel level = LogLevel::LOG_INFO);
 
 	// 同步日志
-	void log(const char* message, LogLevel level = LogLevel::INFO);
+	void log(const char* message, LogLevel level = LogLevel::LOG_INFO);
 
 	// 同步日志（可变参数）
 	void log(LogLevel level, const char* format, ...);
 private:
-	std::string foldername_;
-	LogLevel logLevel_;
-	bool async_;
-	bool daily_;
-	std::atomic<bool> exit_;
-	int retentionDays_;
-	size_t maxSize_;
-	std::ofstream logFile_;
-	std::thread logThread_;
-	std::thread checkThread_;
-	std::mutex logMutex_;
-	std::mutex logQueueMutex_;
-	std::deque<std::string> logQueue_;
-	size_t fileSize_;
+	std::string folderName_;// 日志文件夹名称
+	LogLevel logLevel_;// 日志等级
+	bool async_;// 是否异步打印
+	bool daily_;// 创建日志周期：true:每天创建一个；false:每小时创建一个
+	std::atomic<bool> exit_;// 程序退出标识符
+	int retentionDays_;// 日志留存时间（天）
+	size_t maxSize_;// 单个文件最大长度
+	std::ofstream logFile_;// 日志输出对象
+	std::thread logThread_;// 异步日志线程
+	std::thread checkThread_;// 日志检测线程：超长后新建日志并加后缀做区分；删除旧日志
+	std::mutex logMutex_;// 日志输出对象锁
+	std::mutex logQueueMutex_;// 异步日志队列锁
+	std::deque<std::string> logQueue_;// 异步日志队列
+    static const size_t maxQueueSize_ = 100000;// 异步日志队列数最大值
+	size_t fileSize_;// 当前文件大小
 	int currentFileIndex_; // 每天或每小时的文件编号
 	std::chrono::seconds logCycle_;// 日志刷新周期，单位s
 
@@ -73,7 +73,7 @@ private:
 	// 清理过期的日志文件
 	void cleanOldLogs() const;
 
-	// 获取当前最大序号
+    // 获取当前最大序号
 	int getMaxLogSequence();
 
 	// 重置文件编号
@@ -83,7 +83,7 @@ private:
 	void logThreadFunction();
 
 	//确保在关机前写入所有剩余日志
-	void flush();
+	void flushRemainingLogs();
 
 	// 检测线程工作函数
 	void checkThreadFunction();

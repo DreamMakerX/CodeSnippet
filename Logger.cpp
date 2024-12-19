@@ -1,23 +1,27 @@
 #include "Logger.h"
 #include <iostream>
 #include <iomanip>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <chrono>
 #include <sstream>
 #include <thread>
 #include <mutex>
 #include <vector>
-#include <fstream>
 #include <functional>
 #include <cstdarg>
 #include <regex>
 
-Logger::Logger(const std::string& baseName, LogLevel level, bool async, uint64_t logCycle, bool daily, int retentionDays, size_t maxSize)
-	: foldername_(baseName), logLevel_(level), async_(async), logCycle_(logCycle),
-	  daily_(daily), retentionDays_(retentionDays), maxSize_(maxSize), fileSize_(0), exit_(false),
-	  currentFileIndex_(getMaxLogSequence() + 1) {
+#ifdef _MSC_VER
+#include <windows.h>   // Windows API (VS2015 环境)
+#include <io.h>        // _unlink
+#else
+#include <sys/stat.h>
+#include <dirent.h>  // POSIX 文件操作
+#endif
+
+Logger::Logger(const std::string& folderName, LogLevel level, bool daily, bool async, uint64_t logCycle, int retentionDays, size_t maxSize)
+	: folderName_(folderName), logLevel_(level), async_(async), logCycle_(logCycle),
+	daily_(daily), retentionDays_(retentionDays), maxSize_(maxSize), fileSize_(0), exit_(false),
+	currentFileIndex_(getMaxLogSequence() + 1) {
 
 	if (async_) {
 		logThread_ = std::thread(&Logger::logThreadFunction, this);
@@ -54,8 +58,12 @@ void Logger::log(const char* message, LogLevel level) {
 		{
 			std::lock_guard<std::mutex> lock(logQueueMutex_);
 			logQueue_.push_back(logStream.str());
+			if (logQueue_.size() >= maxQueueSize_) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));// 等待日志打印，防止累积
+			}
 		}
-	} else {
+	}
+	else {
 		writeToFile(logStream.str());
 	}
 }
@@ -65,11 +73,9 @@ void Logger::log(LogLevel level, const char* format, ...) {
 	va_list args;
 	va_start(args, format);
 
-	char buffer[1024];
-	vsnprintf(buffer, sizeof(buffer), format, args);
+	char buffer[1024]{ 0 };
+	vsnprintf(buffer, 1023, format, args);
 	va_end(args);
-
-	buffer[1024 - 1] = 0x00;  // 防止打印溢出
 
 	log(buffer, level);
 }
@@ -83,7 +89,9 @@ std::string Logger::getCurrentTime() const {
 
 	std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
 	std::stringstream ss;
-	ss << std::put_time(std::localtime(&currentTime), "%Y-%m-%d %H:%M:%S");
+	std::tm time;
+	localtime_s(&time, &currentTime);
+	ss << std::put_time(&time, "%Y-%m-%d %H:%M:%S");
 	ss << '.' << std::setw(3) << std::setfill('0') << milliseconds.count();
 	return ss.str();
 }
@@ -91,11 +99,13 @@ std::string Logger::getCurrentTime() const {
 std::string Logger::getCurrentDateHour() const {
 	auto now = std::chrono::system_clock::now();
 	auto time = std::chrono::system_clock::to_time_t(now);
-	std::tm tm = *std::localtime(&time);
+	std::tm tm;
+	localtime_s(&tm, &time);
 	std::stringstream ss;
 	if (daily_) {
 		ss << std::put_time(&tm, "%Y%m%d");
-	} else {
+	}
+	else {
 		ss << std::put_time(&tm, "%Y%m%d%H");
 	}
 	return ss.str();
@@ -103,7 +113,7 @@ std::string Logger::getCurrentDateHour() const {
 
 std::string Logger::getLogFileName() const {
 	std::stringstream fileName;
-	fileName << foldername_ << "/" << getCurrentDateHour() << "_" << currentFileIndex_ << ".log";
+	fileName << folderName_ << "/" << getCurrentDateHour() << "_" << currentFileIndex_ << ".log";
 	return fileName.str();
 }
 
@@ -127,19 +137,59 @@ void Logger::writeToFile(const std::string& message) {
 }
 
 void Logger::cleanOldLogs() const {
-	std::string logDir = foldername_ + "/";
-	DIR* dir = opendir(logDir.c_str());
-	if (dir == nullptr) {
-		std::cerr << "Unable to open<<" << foldername_ << ">> directory!" << std::endl;
+#ifdef _MSC_VER
+	// 添加通配符以匹配所有文件
+	std::string searchPath = folderName_ + "\\*";
+
+	struct _finddata_t fileInfo;
+	intptr_t handle = _findfirst(searchPath.c_str(), &fileInfo);  // 查找第一个文件
+
+	if (handle == -1) {
+		std::cerr << "Unable to open directory: " << folderName_ << std::endl;
 		return;
 	}
 
-	struct dirent * entry;
+	do {
+		std::string fileName = fileInfo.name;
+
+		// 过滤文件名，检查是否符合条件：包含 "_" 且以 ".log" 结尾
+		if (fileName.find("_") != std::string::npos && fileName.find(".log") != std::string::npos) {
+			std::string fullPath = folderName_ + "\\" + fileName;
+
+			struct _stat fileStat;
+			if (_stat(fullPath.c_str(), &fileStat) == 0) {
+				// 获取文件最后修改时间
+				std::time_t lastModifiedTime = fileStat.st_mtime;
+				std::chrono::system_clock::time_point fileTimePoint = std::chrono::system_clock::from_time_t(lastModifiedTime);
+				auto duration = std::chrono::system_clock::now() - fileTimePoint;
+				int daysOld = std::chrono::duration_cast<std::chrono::hours>(duration).count() / 24;
+
+				// 如果文件超出保留天数，删除文件
+				if (daysOld > retentionDays_) {
+					std::cout << "Deleting old log file: " << fullPath << std::endl;
+					if (remove(fullPath.c_str()) != 0) {
+						std::cerr << "Failed to delete file: " << fullPath << std::endl;
+					}
+				}
+			}
+		}
+	} while (_findnext(handle, &fileInfo) == 0);  // 查找下一个文件
+
+	// 关闭句柄
+	_findclose(handle);
+#else
+	DIR* dir = opendir(folderName_.c_str());
+	if (dir == nullptr) {
+		std::cerr << "Unable to open directory: " << folderName_ << std::endl;
+		return;
+	}
+	struct dirent* entry;
+
 	while ((entry = readdir(dir)) != nullptr) {
-		// 只处理日志文件
 		std::string fileName = entry->d_name;
 		if (fileName.find("_") != std::string::npos && fileName.find(".log") != std::string::npos) {
-			std::string fullPath = logDir + fileName;
+			std::string fullPath = folderName_ + "/" + fileName;
+
 			struct stat fileStat;
 			if (stat(fullPath.c_str(), &fileStat) == 0) {
 				std::time_t lastModifiedTime = fileStat.st_mtime;
@@ -154,20 +204,52 @@ void Logger::cleanOldLogs() const {
 			}
 		}
 	}
+
 	closedir(dir);
+#endif
 }
 
 int Logger::getMaxLogSequence() {
 	int maxSequence = -1;  // -1 表示没有找到符合条件的日志文件
 	std::string currentDateHour = getCurrentDateHour();
-	DIR* dir = opendir(foldername_.c_str());
+#ifdef _MSC_VER
+	// 添加通配符以匹配所有文件
+	std::string searchPath = folderName_ + "\\*";
 
-	if (dir == nullptr) {
-		std::cerr << "Failed to open directory: " << foldername_ << std::endl;
+	struct _finddata_t fileInfo;
+	intptr_t handle = _findfirst(searchPath.c_str(), &fileInfo);  // 查找第一个文件
+
+	if (handle == -1) {
+		std::cerr << "Failed to open directory: " << folderName_ << std::endl;
 		return -1;
 	}
 
-	struct dirent * entry;
+	// 使用正则表达式匹配文件名
+	std::regex pattern(currentDateHour + R"(_(\d+)\.log)"); // 日期+_+序号.log
+	std::smatch match;
+
+	do {
+		const std::string fileName = fileInfo.name;
+
+		// 如果文件名匹配当前日期和序号模式
+		if (std::regex_match(fileName, match, pattern)) {
+			// 提取序号并转换为整数
+			int sequence = std::stoi(match[1].str());
+			maxSequence = max(maxSequence, sequence);
+		}
+	} while (_findnext(handle, &fileInfo) == 0);  // 查找下一个文件
+
+	// 关闭句柄
+	_findclose(handle);
+	return maxSequence;
+#else
+	DIR* dir = opendir(folderName_.c_str());
+	if (dir == nullptr) {
+		std::cerr << "Failed to open directory: " << folderName_ << std::endl;
+		return -1;
+	}
+	struct dirent* entry;
+
 	std::regex pattern(currentDateHour + R"(_(\d+)\.log)");  // 正则表达式：日期+_+序号.log
 
 	// 遍历目录中的所有文件
@@ -180,11 +262,12 @@ int Logger::getMaxLogSequence() {
 			// 提取序号并转换为整数
 			int sequence = std::stoi(match[1].str());
 			maxSequence = std::max(maxSequence, sequence);
-		}
 	}
+}
 
 	closedir(dir);  // 关闭目录
 	return maxSequence;
+#endif
 }
 
 void Logger::resetFileIndex() {
@@ -194,7 +277,8 @@ void Logger::resetFileIndex() {
 		currentFileIndex_ = 0;
 		if (!logFile_.is_open()) {
 			logFile_.open(getLogFileName(), std::ios::out | std::ios::app);
-		} else {
+		}
+		else {
 			logFile_.close();
 			fileSize_ = 0;
 			logFile_.open(getLogFileName(), std::ios::out | std::ios::app);
@@ -206,13 +290,12 @@ void Logger::resetFileIndex() {
 void Logger::logThreadFunction() {
 	static auto lastWriteTime = std::chrono::system_clock::now();
 	while (!exit_) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		std::deque<std::string> logsToWrite;
 		{
 			auto currentTime = std::chrono::system_clock::now();
 			std::lock_guard<std::mutex> lock(logQueueMutex_);
-			if(logQueue_.size() >= 100000 || currentTime > lastWriteTime + logCycle_) {
-				//std::cout << getCurrentTime() << ": " << logQueue_.size() << std::endl;
+			if (logQueue_.size() >= maxQueueSize_ || currentTime > lastWriteTime + logCycle_) {
 				logQueue_.swap(logsToWrite);
 				lastWriteTime = currentTime;
 			}
@@ -224,10 +307,10 @@ void Logger::logThreadFunction() {
 		}
 	}
 
-	flush();
+	flushRemainingLogs();
 }
 
-void Logger::flush() {
+void Logger::flushRemainingLogs() {
 	std::deque<std::string> logsToWrite;
 	{
 		std::lock_guard<std::mutex> lock(logMutex_);
@@ -252,13 +335,13 @@ void Logger::checkThreadFunction() {
 
 std::string Logger::logLevelToString(LogLevel level) const {
 	switch (level) {
-	case LogLevel::DEBUG:
+	case LogLevel::LOG_DEBUG:
 		return "DEBUG";
-	case LogLevel::INFO:
+	case LogLevel::LOG_INFO:
 		return "INFO";
-	case LogLevel::WARNING:
+	case LogLevel::LOG_WARNING:
 		return "WARNING";
-	case LogLevel::ERROR:
+	case LogLevel::LOG_ERROR:
 		return "ERROR";
 	}
 	return "UNKNOWN";
